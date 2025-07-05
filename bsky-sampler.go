@@ -71,7 +71,7 @@ func main() {
 		Host: "https://public.api.bsky.app",
 	}
 	ctx := context.Background()
-	postList, err := getHandlePostList(ctx, client, handle, 50)
+	postList, err := getHandlePostList(ctx, client, handle, 100)
 	if err != nil {
 		log.Fatalf("Error fetching posts: %v", err)
 	}
@@ -87,9 +87,5 @@ func main() {
 	}
 
 	http.HandleFunc("/", randomPostHandler)
-
-	fmt.Println("Server starting on :7890")
-	fmt.Println("Visit http://localhost:7890/ to get a random post")
-
-	log.Fatal(http.ListenAndServe(":7890", nil))
+	log.Fatal(http.ListenAndServe(":80", nil))
 }
