@@ -17,14 +17,16 @@ import (
 // Global variables
 var allPosts = &MaxHeap{}
 
-// If limit is higher than 100, we'd need to use the cursor, but I'm keeping it simple for now.
-func getHandlePostList(ctx context.Context, client *xrpc.Client, handle string, limit int64) ([]*bsky.FeedDefs_PostView, error) {
-	// Handle => DiD
+// getHandleDid resolves a Bluesky handle to a DiD
+func getHandleDid(ctx context.Context, client *xrpc.Client, handle string) (string, error) {
 	resolveResp, err := atproto.IdentityResolveHandle(ctx, client, handle)
-	if err != nil {
-		log.Fatalf("Error resolving handle: %v", err)
-	}
-	did := resolveResp.Did
+	return resolveResp.Did, err
+}
+
+// getDidPostList fetches the most recent posts from a given Bluesky handle.
+// It returns a slice of PostView objects, which contain the post data.
+// If limit is higher than 100, we'd need to use the cursor, but I'm keeping it simple for now.
+func getDidPostList(ctx context.Context, client *xrpc.Client, did string, limit int64) ([]*bsky.FeedDefs_PostView, error) {
 	// Get recent posts from author feed
 	feed, err := bsky.FeedGetAuthorFeed(ctx, client, did, "", "posts_no_replies", false, limit)
 	if err != nil {
@@ -73,6 +75,8 @@ func (h *MaxHeap) Get(index int) PostData {
 	return (*h)[index]
 }
 
+// randomPostHandler returns a random post as JSON over HTTP
+// If no posts are available, it returns a 404 error.
 func randomPostHandler(w http.ResponseWriter, r *http.Request) {
 	if allPosts.Len() == 0 {
 		http.Error(w, "No posts available", http.StatusNotFound)
@@ -89,8 +93,10 @@ func randomPostHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func updatePosts(ctx context.Context, client *xrpc.Client, handle string, limit int64) {
-	postList, err := getHandlePostList(ctx, client, handle, 100)
+// updatePosts fetches the 100 most recent posts from a given Bluesky handle
+// and updates the global post list.
+func updatePosts(ctx context.Context, client *xrpc.Client, did string) {
+	postList, err := getDidPostList(ctx, client, did, 100)
 	if err != nil {
 		log.Fatalf("Error fetching posts: %v", err)
 	}
@@ -106,8 +112,10 @@ func updatePosts(ctx context.Context, client *xrpc.Client, handle string, limit 
 	}
 }
 
-func checkForNewPosts(ctx context.Context, client *xrpc.Client, handle string, limit int64) {
-	postList, err := getHandlePostList(ctx, client, handle, 1)
+// checkForNewPosts checks if there are new posts since the last update.
+// If there are new posts, it updates the global post list.
+func checkForNewPosts(ctx context.Context, client *xrpc.Client, did string) {
+	postList, err := getDidPostList(ctx, client, did, 1)
 	if err != nil {
 		log.Printf("Error fetching posts: %v", err)
 		return
@@ -117,9 +125,10 @@ func checkForNewPosts(ctx context.Context, client *xrpc.Client, handle string, l
 		return
 	}
 	// Look at the 100 most recent posts
-	updatePosts(ctx, client, handle, 100)
+	updatePosts(ctx, client, did)
 }
 
+// main function initializes the HTTP server and starts the periodic post update.
 func main() {
 	handle := "carl.cx"
 	fmt.Printf("Fetching data for Bluesky handle: %s\n", handle)
@@ -127,8 +136,13 @@ func main() {
 		Host: "https://public.api.bsky.app",
 	}
 	ctx := context.Background()
+	// get DiD for handle
+	myDid, err := getHandleDid(ctx, client, handle)
+	if err != nil {
+		log.Fatalf("Error getting handle DiD: %v", err)
+	}
 	// Initialize the recent post list
-	updatePosts(ctx, client, handle, 100)
+	updatePosts(ctx, client, myDid)
 
 	http.HandleFunc("/", randomPostHandler)
 
@@ -138,7 +152,7 @@ func main() {
 		for {
 			<-ticker.C
 			fmt.Println("Checking for new posts")
-			checkForNewPosts(ctx, client, handle, 100)
+			checkForNewPosts(ctx, client, myDid)
 		}
 	}()
 
