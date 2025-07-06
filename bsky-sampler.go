@@ -7,11 +7,15 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"time"
 
 	"github.com/bluesky-social/indigo/api/atproto"
 	"github.com/bluesky-social/indigo/api/bsky"
 	"github.com/bluesky-social/indigo/xrpc"
 )
+
+// Global variables
+var allPosts = &MaxHeap{}
 
 // If limit is higher than 100, we'd need to use the cursor, but I'm keeping it simple for now.
 func getHandlePostList(ctx context.Context, client *xrpc.Client, handle string, limit int64) ([]*bsky.FeedDefs_PostView, error) {
@@ -42,35 +46,50 @@ type PostData struct {
 	Uri       string `json:"uri"`
 }
 
-var allPosts []PostData
+// impl max heap for PostData
+type MaxHeap []PostData
+
+func (h MaxHeap) Len() int { return len(h) }
+func (h MaxHeap) Less(i, j int) bool {
+	return h[i].Timestamp > h[j].Timestamp
+}
+func (h MaxHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *MaxHeap) Push(x interface{}) {
+	*h = append(*h, x.(PostData))
+}
+func (h *MaxHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
+}
+
+// Get entry at index
+func (h *MaxHeap) Get(index int) PostData {
+	if index < 0 || index >= len(*h) {
+		panic("Index out of bounds")
+	}
+	return (*h)[index]
+}
 
 func randomPostHandler(w http.ResponseWriter, r *http.Request) {
-	if len(allPosts) == 0 {
+	if allPosts.Len() == 0 {
 		http.Error(w, "No posts available", http.StatusNotFound)
 		return
 	}
 
 	// Get a random post
-	randomIndex := rand.Intn(len(allPosts))
-	randomPost := allPosts[randomIndex]
-
-	// Set content type to JSON
+	randomIndex := rand.Intn(allPosts.Len())
+	randomPost := allPosts.Get(randomIndex)
 	w.Header().Set("Content-Type", "application/json")
-
-	// Encode and send the random post
 	if err := json.NewEncoder(w).Encode(randomPost); err != nil {
 		http.Error(w, "Error encoding JSON", http.StatusInternalServerError)
 		return
 	}
 }
 
-func main() {
-	handle := "carl.cx"
-	fmt.Printf("Fetching data for Bluesky handle: %s\n", handle)
-	client := &xrpc.Client{
-		Host: "https://public.api.bsky.app",
-	}
-	ctx := context.Background()
+func updatePosts(ctx context.Context, client *xrpc.Client, handle string, limit int64) {
 	postList, err := getHandlePostList(ctx, client, handle, 100)
 	if err != nil {
 		log.Fatalf("Error fetching posts: %v", err)
@@ -83,9 +102,45 @@ func main() {
 			Timestamp: feedPost.CreatedAt,
 			Uri:       post.Uri,
 		}
-		allPosts = append(allPosts, postData)
+		allPosts.Push(postData)
 	}
+}
+
+func checkForNewPosts(ctx context.Context, client *xrpc.Client, handle string, limit int64) {
+	postList, err := getHandlePostList(ctx, client, handle, 1)
+	if err != nil {
+		log.Printf("Error fetching posts: %v", err)
+		return
+	}
+	recentPost := postList[0].Record.Val.(*bsky.FeedPost)
+	if recentPost.CreatedAt <= allPosts.Get(0).Timestamp {
+		return
+	}
+	// Look at the 100 most recent posts
+	updatePosts(ctx, client, handle, 100)
+}
+
+func main() {
+	handle := "carl.cx"
+	fmt.Printf("Fetching data for Bluesky handle: %s\n", handle)
+	client := &xrpc.Client{
+		Host: "https://public.api.bsky.app",
+	}
+	ctx := context.Background()
+	// Initialize the recent post list
+	updatePosts(ctx, client, handle, 100)
 
 	http.HandleFunc("/", randomPostHandler)
+
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			<-ticker.C
+			fmt.Println("Checking for new posts")
+			checkForNewPosts(ctx, client, handle, 100)
+		}
+	}()
+
 	log.Fatal(http.ListenAndServe(":80", nil))
 }
